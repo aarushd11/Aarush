@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Timetable</title>
+  <meta name="description" content="Find your day-wise class timetable by year and group.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='26' height='24' rx='5' fill='%234f46e5'/%3E%3Crect x='3' y='5' width='26' height='7' rx='3' fill='%23312e81'/%3E%3Ccircle cx='11' cy='19' r='2' fill='white'/%3E%3Ccircle cx='16' cy='19' r='2' fill='white'/%3E%3Ccircle cx='21' cy='19' r='2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>My Timetable</span>
+      </div>
+      <div class="data-status" id="dataStatus" hidden>
+        <span id="dataStatusText"></span>
+        <button class="link-btn" id="changeFileBtn" type="button">Change file</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="loadingView" class="card loading-card" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span> Loading timetable…
+    </section>
+
+    <!-- Upload -->
+    <section id="uploadView" class="card upload-card" hidden>
+      <h1>Load your timetable sheet</h1>
+      <p class="muted">Upload the Excel file with every batch's timetable. It is read right here in your browser – nothing is sent anywhere.</p>
+      <label class="dropzone" id="dropzone" for="fileInput">
+        <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><path fill="currentColor" d="M19 13v6H5v-6H3v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6h-2Zm-6-9.17 3.59 3.58L18 6l-6-6-6 6 1.41 1.41L11 3.83V16h2V3.83Z"/></svg>
+        <strong>Drop the Excel file here</strong>
+        <span class="muted">or tap to choose · .xlsx, .xls, .csv</span>
+        <input type="file" id="fileInput" accept=".xlsx,.xls,.xlsm,.csv,.ods" hidden>
+      </label>
+      <div id="uploadMsg" class="msg" hidden></div>
+      <button class="link-btn" id="useDefaultBtn" type="button" hidden>Use the site's published timetable instead</button>
+    </section>
+
+    <!-- Finder -->
+    <section id="finderView" class="card finder" hidden>
+      <h1>Find your timetable</h1>
+      <form id="finderForm" class="finder-form" autocomplete="off">
+        <label class="field" id="yearField">
+          <span>Year</span>
+          <select id="yearSelect" required></select>
+        </label>
+        <label class="field" id="categoryField" hidden>
+          <span id="categoryLabel">Category</span>
+          <select id="categorySelect"></select>
+        </label>
+        <label class="field grow">
+          <span>Group number</span>
+          <input id="groupInput" list="groupList" placeholder="e.g. G12" required inputmode="text">
+          <datalist id="groupList"></datalist>
+        </label>
+        <button class="btn primary" type="submit">Show timetable</button>
+      </form>
+      <div id="finderMsg" class="msg" hidden></div>
+    </section>
+
+    <!-- Result -->
+    <section id="resultView" hidden>
+      <div class="result-head">
+        <div>
+          <p class="eyebrow" id="resultEyebrow"></p>
+          <h2 id="resultTitle"></h2>
+          <p class="stats" id="resultStats"></p>
+        </div>
+        <div class="result-actions">
+          <div class="seg" role="tablist" aria-label="View">
+            <button type="button" role="tab" data-view="days" aria-selected="true">Day-wise</button>
+            <button type="button" role="tab" data-view="week" aria-selected="false">Week grid</button>
+          </div>
+          <button class="btn ghost" id="copyLinkBtn" type="button">Copy link</button>
+          <button class="btn ghost" id="printBtn" type="button">Print</button>
+        </div>
+      </div>
+      <nav class="day-tabs" id="dayTabs" aria-label="Jump to day"></nav>
+      <div id="daysView" class="days"></div>
+      <div id="weekView" class="week" hidden></div>
+    </section>
+
+    <details class="card diag" id="diag" hidden>
+      <summary>How the sheet was read</summary>
+      <div id="diagBody"></div>
+    </details>
+  </main>
+
+  <footer class="wrap foot muted">Classes shared with other groups are marked <span class="chip">Together with …</span></footer>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/parser.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
