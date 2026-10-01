@@ -17,9 +17,25 @@ Then drop the Excel file on the page.
 The site loads it automatically, so visitors only pick their year and group.
 (This needs the site to be served over http(s). It doesn't work from `file://`.)
 
-## Supported sheet layouts
+## The published timetable
 
-Each sheet is detected automatically. You can see what was detected under **"How the sheet was read"** at the bottom of the page.
+`data/timetable.xlsx` is the **July–December 2026 timetable** (all years plus PG). The site loads it automatically.
+To update it, replace that file with the new sheet. Keep the same file name.
+
+What the site reads from the sheet:
+
+- **Year:** taken from the sheet name (`FIRST YEAR A`, `2ND YEAR A`, …, `PG TIME TABLE`).
+- **Groups:** read from the `TUTORIAL` header row (`1A11`, `2C13`, …). The `PRACTICAL` names (`1A1A`, …) work too.
+- **Branch:** read from the `BRANCH` row when the sheet has one.
+- **What each class covers:** a subject cell is merged across every group that attends it. A lecture merged across the whole `1A1` batch shows as *Whole 1A1 batch*. When other batches sit the same lecture in the same room at the same time, it shows *Whole 1A1 batch + 1A2, 1A3*.
+- **Class details:** the code's last letter gives the type (`L` lecture, `T` tutorial, `P` lab). The row under the code holds the room, and the teacher is in the last column of the group's span.
+- **Labs:** a `LAB` cell in the next slot means the lab continues. Its teacher is written under it.
+
+Open **"How the sheet was read"** at the bottom of the page to see how many classes were found on each sheet.
+
+## Other sheet layouts
+
+Other layouts are detected automatically too. You can see what was detected under **"How the sheet was read"** at the bottom of the page.
 
 **1. List layout: one row per class**
 

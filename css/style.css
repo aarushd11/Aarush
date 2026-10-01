@@ -63,6 +63,11 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.25; }
 main { padding-top: 20px; padding-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 
+/* Loading */
+.loading-card { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 28px; max-width: 620px; margin: 24px auto; color: var(--muted); font-weight: 600; }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Upload */
 .upload-card { padding: 28px 24px; max-width: 620px; margin: 24px auto; text-align: center; }
 .upload-card h1 { font-size: 24px; margin-bottom: 6px; }
@@ -152,11 +157,12 @@ details.chip summary::-webkit-details-marker { display: none; }
 /* Week grid */
 .table-scroll { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
 .week-table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 13px; }
+.week-table td[rowspan] { background-clip: padding-box; }
 .week-table th, .week-table td { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); padding: 8px; vertical-align: top; text-align: left; }
 .week-table tr > :last-child { border-right: 0; }
 .week-table tr:last-child > * { border-bottom: 0; }
 .week-table thead th, .week-table tr:first-child th { background: var(--surface-2); font-weight: 700; }
-.week-table th.today { background: var(--accent); color: var(--accent-ink); }
+.week-table tr:first-child th.today, .week-table th.today { background: var(--accent); color: var(--accent-ink); }
 .week-table td.today { background: color-mix(in srgb, var(--accent-soft) 60%, transparent); }
 .time-col { white-space: nowrap; font-variant-numeric: tabular-nums; background: var(--surface-2); width: 1%; }
 .time-col .to { color: var(--muted); margin: 0 2px; }

@@ -9,6 +9,7 @@
   const state = {
     entries: [],
     index: {},
+    aliases: {},
     source: null,        // {name, kind: 'upload'|'default'}
     hasDefault: false,
     view: 'days',
@@ -66,13 +67,14 @@
 
   function loadWorkbook(buf, name, kind) {
     const wb = XLSX.read(buf, { type: 'array', cellDates: false });
-    const { entries, report } = P.parseWorkbook(wb, XLSX);
+    const { entries, report, aliases } = P.parseWorkbook(wb, XLSX);
     renderDiag(report, entries.length);
     if (!entries.length) {
       throw new Error('Could not find any classes in this file. Open "How the sheet was read" below for details.');
     }
     state.entries = entries;
     state.index = P.buildIndex(entries);
+    state.aliases = aliases || {};
     state.source = { name, kind };
     const groups = new Set();
     for (const y in state.index) for (const c in state.index[y]) for (const k of state.index[y][c].keys()) groups.add(y + '|' + c + '|' + k);
@@ -88,6 +90,7 @@
     const up = await loadUpload();
     const src = up || def;
     if (!src) return showUpload();
+    await new Promise((r) => setTimeout(r, 0)); // let the loading message paint
     try {
       loadWorkbook(src.buf, src.name, up ? 'upload' : 'default');
       showFinder();
@@ -117,6 +120,7 @@
   // ---------- views ----------
 
   function showUpload(err) {
+    $('loadingView').hidden = true;
     $('uploadView').hidden = false;
     $('finderView').hidden = true;
     $('resultView').hidden = true;
@@ -125,6 +129,7 @@
     if (err) { msg.hidden = false; msg.className = 'msg error'; msg.textContent = err; } else msg.hidden = true;
   }
   function showFinder() {
+    $('loadingView').hidden = true;
     $('uploadView').hidden = true;
     $('finderView').hidden = false;
   }
@@ -146,7 +151,11 @@
     const cats = y in state.index ? Object.keys(state.index[y]).sort(P.naturalCompare) : [];
     const cs = $('categorySelect');
     cs.innerHTML = '';
-    const hasCats = cats.length > 1 || (cats.length === 1 && cats[0] !== '');
+    // Only ask for a category when the same group name exists in more than one.
+    const seenKeys = new Set();
+    let dup = false;
+    for (const c of cats) for (const k of state.index[y][c].keys()) { if (seenKeys.has(k)) dup = true; seenKeys.add(k); }
+    const hasCats = dup;
     $('categoryField').hidden = !hasCats;
     if (hasCats) {
       cs.append(new Option('Any', '*'));
@@ -175,7 +184,7 @@
     for (const g of list) {
       const o = document.createElement('option');
       o.value = g.name;
-      if (g.category) o.label = g.category;
+      if (g.category) o.label = titleCase(g.category);
       dl.append(o);
     }
     $('groupInput').placeholder = list.length ? `e.g. ${list[Math.min(1, list.length - 1)].name}` : 'No groups for this year';
@@ -184,8 +193,10 @@
   /** Resolves what the user typed into one group, tolerating "12" for "G12" etc. */
   function resolveGroup(y, cat, typed) {
     const list = groupsFor(y, cat);
-    const key = P.groupKey(typed);
+    let key = P.groupKey(typed);
     if (!key) return { error: 'Please enter your group number.' };
+    const alias = (state.aliases[y] || {})[key];
+    if (alias && !list.some((g) => g.key === key)) key = P.groupKey(alias);
     let hits = list.filter((g) => g.key === key);
     if (!hits.length) {
       const digits = key.replace(/\D/g, '');
@@ -216,7 +227,7 @@
     if (r.error) { msg.hidden = false; msg.className = 'msg error'; msg.textContent = r.error; $('resultView').hidden = true; return; }
     const g = r.group;
     $('groupInput').value = g.name;
-    state.current = { year: y, category: g.category, gKey: g.key, gName: g.name };
+    state.current = { year: y, category: g.category, filter: $('categoryField').hidden ? null : g.category, gKey: g.key, gName: g.name };
     prefs.set({ y, c: cat, g: g.name });
     history.replaceState(null, '', '#' + new URLSearchParams({ year: y, ...(g.category ? { cat: g.category } : {}), group: g.name }).toString());
     renderResult();
@@ -236,6 +247,7 @@
 
   // ---------- rendering ----------
 
+  const titleCase = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/\b([a-z])/g, (m) => m.toUpperCase()).replace(/\bAnd\b/g, 'and');
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   function hue(text) {
@@ -265,6 +277,20 @@
 
   function togetherHtml(c) {
     if (c.togetherAll) return '<span class="chip together">With all groups</span>';
+    const tp = c.togetherParts;
+    if (tp && (tp.wholeOwn || tp.parts.length)) {
+      // e.g. "Whole 1A1 batch + 1A2 batch, 1A3 batch" or "Together with 1A12"
+      const MAX = 6;
+      const lead = tp.wholeOwn ? `Whole ${esc(tp.wholeOwn)} batch` : 'Together with';
+      // Other full batches are listed by batch name only (e.g. "1A2").
+      if (!tp.parts.length) return `<span class="chip together" title="${esc(c.together.join(', '))}">${lead}</span>`;
+      const shown = tp.parts.slice(0, MAX).map(esc).join(', ');
+      const more = tp.parts.length - MAX;
+      const head = `${lead}${tp.wholeOwn ? ' +' : ''} ${shown}`;
+      if (more <= 0) return `<span class="chip together" title="${esc(c.together.join(', '))}">${head}</span>`;
+      return `<details class="chip together more"><summary>${head} <b>+${more} more</b></summary>
+        <div class="all-groups">${tp.parts.map(esc).join(', ')}</div></details>`;
+    }
     if (!c.together.length) return '';
     const MAX = 6;
     const shown = c.together.slice(0, MAX).map(esc).join(', ');
@@ -291,14 +317,14 @@
 
   function renderResult() {
     const cur = state.current;
-    const days = P.timetableFor(state.entries, cur.year, cur.category, cur.gKey);
+    const days = P.timetableFor(state.entries, cur.year, cur.filter, cur.gKey);
     const todayIdx = (new Date().getDay() + 6) % 7;
 
-    $('resultEyebrow').textContent = [cur.year !== '' ? yearLabel(cur.year) : '', cur.category].filter(Boolean).join(' · ');
+    $('resultEyebrow').textContent = [cur.year !== '' ? yearLabel(cur.year) : '', titleCase(cur.category)].filter(Boolean).join(' · ');
     $('resultTitle').textContent = `Group ${cur.gName}`;
     const total = days.reduce((n, d) => n + d.slots.reduce((m, s) => m + s.classes.length, 0), 0);
     const mins = days.reduce((n, d) => n + d.slots.reduce((m, s) => m + (s.end != null && s.start != null ? s.end - s.start : 0), 0), 0);
-    const shared = days.reduce((n, d) => n + d.slots.reduce((m, s) => m + s.classes.filter((c) => c.together.length || c.togetherAll).length, 0), 0);
+    const shared = days.reduce((n, d) => n + d.slots.reduce((m, s) => m + s.classes.filter((c) => c.together.length || c.togetherAll || (c.togetherParts && c.togetherParts.wholeOwn)).length, 0), 0);
     $('resultStats').textContent = `${total} classes a week across ${days.length} days` +
       (mins ? ` · ${Math.round(mins / 6) / 10} hours` : '') + (shared ? ` · ${shared} shared with other groups` : '');
 
@@ -343,26 +369,48 @@
 
   function renderWeek(days, todayIdx) {
     if (!days.length) { $('weekView').innerHTML = ''; return; }
-    const slotKeys = new Map();
-    for (const d of days) for (const s of d.slots) {
-      const k = s.start == null ? 'L' + s.label : `${String(s.start).padStart(4, '0')}-${s.end ?? ''}`;
-      if (!slotKeys.has(k)) slotKeys.set(k, s);
+    // Rows = consecutive time boundaries; a class spans as many rows as it lasts.
+    const all = days.flatMap((d) => d.slots.flatMap((s) => s.classes.map((c) => ({ ...c, day: d.day }))));
+    const timed = all.filter((c) => c.start != null);
+    const bounds = [...new Set(timed.flatMap((c) => [c.start, c.end ?? c.start + 50]))].sort((x, y) => x - y);
+    const rowOf = (m) => bounds.indexOf(m);
+    const grid = {}; // day -> row -> {span, classes} | 'covered'
+    for (const d of days) {
+      const col = (grid[d.day] = []);
+      const list = timed.filter((c) => c.day === d.day).sort((x, y) => x.start - y.start || (y.end ?? 0) - (x.end ?? 0));
+      for (const c of list) {
+        const r0 = rowOf(c.start), r1 = rowOf(c.end ?? c.start + 50);
+        let owner = r0;
+        while (owner >= 0 && col[owner] === 'covered') owner--;
+        if (col[r0] === 'covered' || (col[r0] && col[r0].classes)) { col[owner].classes.push(c); continue; }
+        col[r0] = { span: Math.max(1, r1 - r0), classes: [c] };
+        for (let r = r0 + 1; r < r1; r++) col[r] = 'covered';
+      }
     }
-    const keys = [...slotKeys.keys()].sort();
-    const head = `<tr><th class="corner">Time</th>${days.map((d) => `<th class="${d.day === todayIdx ? 'today' : ''}">${d.name.slice(0, 3)}</th>`).join('')}</tr>`;
-    const body = keys.map((k) => {
-      const s = slotKeys.get(k);
-      const cells = days.map((d) => {
-        const hit = d.slots.find((x) => (x.start == null ? 'L' + x.label : `${String(x.start).padStart(4, '0')}-${x.end ?? ''}`) === k);
-        if (!hit) return `<td class="${d.day === todayIdx ? 'today' : ''}"></td>`;
-        return `<td class="${d.day === todayIdx ? 'today' : ''}">${hit.classes.map((c) => `<div class="mini" style="--h:${hue(c.subject)}">
+    const tdClass = (d) => (d.day === todayIdx ? ' class="today"' : '');
+    const mini = (c) => `<div class="mini" style="--h:${hue(c.subject)}">
           <b>${esc(c.subject)}</b>${c.type ? ` <span class="pill ${typeClass(c.type)}">${esc(c.type)}</span>` : ''}
           ${c.room ? `<span class="mini-meta">${esc(c.room)}</span>` : ''}
-          ${c.together.length || c.togetherAll ? `<span class="mini-meta shared" title="${esc(c.togetherAll ? 'All groups' : c.together.join(', '))}">+${c.togetherAll ? 'all' : c.together.length} group${c.together.length === 1 ? '' : 's'}</span>` : ''}
-        </div>`).join('')}</td>`;
-      }).join('');
-      return `<tr><th class="time-col">${timeText(s)}</th>${cells}</tr>`;
-    }).join('');
+          ${c.faculty ? `<span class="mini-meta">${esc(c.faculty)}</span>` : ''}
+          ${c.together.length || c.togetherAll ? `<span class="mini-meta shared" title="${esc(c.togetherAll ? 'All groups' : c.together.join(', '))}">${c.togetherParts && c.togetherParts.wholeOwn ? `whole ${esc(c.togetherParts.wholeOwn)}${c.togetherParts.parts.length ? ' +' + c.togetherParts.parts.length : ''}` : `+${c.togetherAll ? 'all' : c.together.length} group${c.together.length === 1 ? '' : 's'}`}</span>` : ''}
+        </div>`;
+    const head = `<tr><th class="corner">Time</th>${days.map((d) => `<th${tdClass(d)}>${d.name.slice(0, 3)}</th>`).join('')}</tr>`;
+    let body = '';
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const anyHere = days.some((d) => grid[d.day][i]);
+      if (!anyHere) continue; // nobody has class in this stretch (e.g. lunch)
+      body += `<tr><th class="time-col">${P.fmtTime(bounds[i])}<span class="to">–</span>${P.fmtTime(bounds[i + 1])}</th>` + days.map((d) => {
+        const cell = grid[d.day][i];
+        if (cell === 'covered') return '';
+        if (!cell) return `<td${tdClass(d)}></td>`;
+        return `<td${tdClass(d)}${cell.span > 1 ? ` rowspan="${cell.span}"` : ''}>${cell.classes.map(mini).join('')}</td>`;
+      }).join('') + '</tr>';
+    }
+    // Classes with no clock time (e.g. "Period 1") go at the bottom.
+    const untimed = all.filter((c) => c.start == null);
+    if (untimed.length) {
+      body += `<tr><th class="time-col">Other</th>${days.map((d) => `<td${tdClass(d)}>${untimed.filter((c) => c.day === d.day).map((c) => `<div class="mini-meta">${esc(c.label)}</div>${mini(c)}`).join('')}</td>`).join('')}</tr>`;
+    }
     $('weekView').innerHTML = `<div class="table-scroll"><table class="week-table">${head}${body}</table></div>`;
   }
 
@@ -379,6 +427,7 @@
     const label = { year: 'Year', category: 'Category', group: 'Group', day: 'Day', time: 'Time', start: 'Start', end: 'End', subject: 'Subject', code: 'Code', type: 'Type', faculty: 'Faculty', room: 'Room' };
     $('diagBody').innerHTML = `<p>${total.toLocaleString()} class entries found.</p><ul>` + report.map((r) => {
       if (r.layout === 'skipped') return `<li><b>${esc(r.sheet)}</b> – skipped: ${esc(r.note)}</li>`;
+      if (r.layout === 'block') return `<li><b>${esc(r.sheet)}</b> – timetable grid, ${r.groupColumns} groups, ${r.rows} classes${r.unknown ? ` (${r.unknown} cells not understood)` : ''}</li>`;
       if (r.layout === 'grid') return `<li><b>${esc(r.sheet)}</b> – grid layout, ${r.groupColumns} group columns, ${r.rows} entries</li>`;
       const cols = Object.entries(r.columns).map(([f, h]) => `${label[f]} ← “${esc(h)}”`).join(', ');
       return `<li><b>${esc(r.sheet)}</b> – list layout, ${r.rows} entries. Columns: ${cols}</li>`;

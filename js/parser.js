@@ -99,7 +99,8 @@
       if (v >= 100 && v <= 2359) return { m: Math.floor(v / 100) * 60 + (v % 100), ap: 'x' };
       return null;
     }
-    const s = String(v).trim().toLowerCase().replace(/\s+/g, '');
+    // "8:50:AM", "9:40: AM" -> "8:50am"
+    const s = String(v).trim().toLowerCase().replace(/\s+/g, '').replace(/[:.]+(?=[ap]\.?m?\.?$)/, '');
     const m = s.match(/^(\d{1,2})(?:[:.](\d{2}))?(?::\d{2})?(am|pm|a\.m\.|p\.m\.|a|p)?$/) ||
               s.match(/^(\d{2})(\d{2})(am|pm)?$/);
     if (!m) return null;
@@ -251,15 +252,277 @@
     return s && !matchField(s) && s.length <= 30;
   }
 
+
+  // ---------- "block grid" layout (university master timetable) ----------
+  //
+  //            | LECTURE   |  1A1 (merged over its groups)          | 1A2 ...
+  //            | TUTORIAL  |  1A11  | 1A12  | ...                   |
+  //  DAY SR NO | PRACTICAL | HOURS | 1A1A  | 1A1B  | ...           |
+  //   M    1   |           | 8:00  | UCB009L (merged over all groups taught together)
+  //   O        |           |       | LP101 (room)            ... | SBA (teacher, last column)
+  //
+  // Every group owns a span of columns (usually 2). A subject cell is merged
+  // across exactly the groups that attend it; the row under it holds the room
+  // and, in the span's last column, the teacher. A "LAB" cell continues the
+  // practical started in the slot above (its teacher is written below it).
+
+  // Subject codes like "UCB009L", "UMA022 L", "PCYXXXP", "PMC L", "PBT110P G1".
+  const CODE_RE = /^([A-Za-z]{2,}[A-Za-z0-9&-]*?(?:\d|XXX)[A-Za-z0-9]*?|[A-Z]{3,}(?=\s))\s*([LTP])(?![A-Za-z0-9])\s*(.*)$/;
+  // Looser whole-cell form: "BEST3.3T", "BEST-SENP", "BEST-EE/HP L" (needs a separator or digit).
+  const LINE_RE = /^([A-Z]{3,}[A-Z0-9 .\/-]*?[-. \d\/][A-Z0-9 .\/-]*?)[\s-]*([LTP])$/;
+  const PAREN_RE = /^(.*?)\s*\(\s*([LTP])\s*\)\s*(.*)$/; // "BES -EE(P)" 
+  const LABELS = { lecture: /^lectures?$/i, tutorial: /^tutorials?$/i, practical: /^practicals?$/i, branch: /^(branch|department|programme|program)$/i };
+
+  function mergeIndex(ws) {
+    const at = new Map();   // "r:c" of every merged cell -> merge
+    for (const m of ws['!merges'] || []) {
+      for (let r = m.s.r; r <= m.e.r; r++) for (let c = m.s.c; c <= m.e.c; c++) at.set(r + ':' + c, m);
+    }
+    return at;
+  }
+
+  function detectBlockGrid(rows) {
+    for (let r = 0; r < Math.min(rows.length, 20); r++) {
+      const row = rows[r] || [];
+      let dayCol = -1, timeCol = -1;
+      for (let c = 0; c < Math.min(row.length, 10); c++) {
+        const v = clean(row[c]).toLowerCase();
+        if (v === 'day' && dayCol < 0) dayCol = c;
+        if (/^(hours?|time|timings?)$/.test(v) && timeCol < 0) timeCol = c;
+      }
+      if (dayCol < 0 || timeCol < 0) continue;
+      // The group columns end where the sheet repeats its DAY column on the right.
+      // (the marker may sit on any header row, so check them all).
+      let endCol = row.length - 1;
+      for (let rr = 0; rr <= r + 1 && rr < rows.length; rr++) {
+        const hr = rows[rr] || [];
+        for (let c = timeCol + 1; c < Math.min(hr.length, endCol + 1); c++) {
+          if (/^(day|sr\.?\s*no\.?|hours?|lecture|tutorial|practical)$/i.test(clean(hr[c]))) { endCol = c - 1; break; }
+        }
+      }
+      return { hr: r, dayCol, timeCol, firstCol: timeCol + 1, endCol };
+    }
+    return null;
+  }
+
+  function parseBlockGrid(rows, ws, g, sheetName, out, aliases) {
+    const merges = mergeIndex(ws);
+    const isTimeRow = (r) => rows[r] && parseClock(rows[r][g.timeCol]) != null && rows[r][g.timeCol] !== '';
+    const areaCount = (r) => { let n = 0; for (let c = g.firstCol; c <= g.endCol; c++) if (clean((rows[r] || [])[c])) n++; return n; };
+
+    // Header rows: look for LECTURE / TUTORIAL / PRACTICAL / BRANCH labels left of the grid.
+    const label = {};
+    for (let r = 0; r <= g.hr + 1 && r < rows.length; r++) {
+      for (let c = 0; c < g.firstCol; c++) {
+        const v = clean((rows[r] || [])[c]);
+        for (const k in LABELS) if (LABELS[k].test(v) && label[k] == null) label[k] = r;
+      }
+    }
+    let groupRow, batchRow, aliasRow = null, branchRow = null;
+    if (label.tutorial != null) {
+      groupRow = label.tutorial;
+      batchRow = label.lecture != null ? label.lecture : null;
+      aliasRow = label.practical != null && label.practical !== groupRow ? label.practical : null;
+      if (label.branch != null) branchRow = label.branch;
+      else if (batchRow != null && batchRow > 0 && areaCount(batchRow - 1) >= 2 &&
+        !(rows[batchRow - 1] || []).some((v) => /year|time\s*table/i.test(String(v)))) branchRow = batchRow - 1;
+    } else {
+      // No labels (e.g. PG sheet): programme row on top, group row just below it.
+      let r = g.hr;
+      while (r + 1 < rows.length && !isTimeRow(r + 1) && areaCount(r + 1) >= 3) r++;
+      groupRow = r;
+      batchRow = r > g.hr ? r - 1 : null;
+    }
+
+    // Value of a header cell, taking merged headers into account.
+    const headerAt = (r, c) => {
+      if (r == null) return '';
+      const m = merges.get(r + ':' + c);
+      return clean(m ? (rows[m.s.r] || [])[m.s.c] : (rows[r] || [])[c]);
+    };
+
+    // Units = the groups (column spans) along the group row.
+    const units = [];
+    for (let c = g.firstCol; c <= g.endCol;) {
+      const m = merges.get(groupRow + ':' + c);
+      const c1 = m ? Math.min(m.e.c, g.endCol) : (clean(rows[groupRow][c]) ? c + 1 : c);
+      const name = headerAt(groupRow, c) || headerAt(batchRow, c);
+      if (name) {
+        units.push({
+          c0: c, c1, name,
+          batch: headerAt(batchRow, c),
+          branch: headerAt(branchRow, c),
+          alias: aliasRow != null ? headerAt(aliasRow, c) : '',
+        });
+      }
+      c = c1 + 1;
+    }
+    if (!units.length) return { units: 0 };
+
+    // Disambiguate repeated names (e.g. "G1" under two programmes).
+    const byName = new Map();
+    for (const u of units) { const k = groupKey(u.name); (byName.get(k) || byName.set(k, []).get(k)).push(u); }
+    for (const list of byName.values()) {
+      if (new Set(list.map((u) => u.batch)).size > 1) for (const u of list) if (u.batch && u.batch !== u.name) u.name = `${u.batch} ${u.name}`;
+    }
+
+    // Batch info shared by this sheet's entries, used to say "whole batch" for lectures.
+    const bm = { of: {}, size: {}, branch: {} };
+    for (const u of units) {
+      const k = groupKey(u.name);
+      if (!(k in bm.branch)) bm.branch[k] = u.branch || '';
+      if (u.batch && !bm.of[k]) { bm.of[k] = u.batch; bm.size[u.batch] = (bm.size[u.batch] || 0) + 1; }
+    }
+
+    const year = /\bpg\b|post\s*grad/i.test(sheetName) ? 'PG' : (/^\d$/.test(parseYear(sheetName)) ? parseYear(sheetName) : clean(sheetName));
+    for (const u of units) {
+      if (u.alias && groupKey(u.alias) !== groupKey(u.name)) {
+        (aliases[year] = aliases[year] || {})[groupKey(u.alias)] = u.name;
+      }
+    }
+    const unitsIn = (a, b) => units.filter((u) => u.c1 >= a && u.c0 <= b);
+
+    // Time rows and day blocks.
+    const times = [];
+    for (let r = groupRow + 1; r < rows.length; r++) if (isTimeRow(r)) times.push(r);
+    let dayIdx = -1, prev = Infinity;
+    const blocks = [];
+    for (const r of times) {
+      const t = fix12(parseClock(rows[r][g.timeCol])).m;
+      if (t <= prev) { dayIdx++; blocks.push({ start: r, rows: [] }); }
+      blocks[blocks.length - 1].rows.push({ r, t });
+      prev = t;
+    }
+    blocks.forEach((b, i) => {
+      const endR = i + 1 < blocks.length ? blocks[i + 1].start - 1 : b.rows[b.rows.length - 1].r + 1;
+      let letters = '';
+      for (let r = b.start; r <= endR; r++) letters += clean((rows[r] || [])[g.dayCol]);
+      const d = parseDays(letters.replace(/[^a-z]/gi, ''));
+      b.day = d.length === 1 ? d[0] : i;
+    });
+
+    let count = 0, unknown = 0;
+    for (const b of blocks) {
+      const open = new Map(); // unit -> practical entry that may continue
+      const last = new Map(); // unit -> latest entry of the day
+      b.rows.forEach(({ r, t }, i) => {
+        const next = b.rows[i + 1];
+        const len = next && next.t - t > 0 && next.t - t <= 120 ? next.t - t : 50;
+        const row = rows[r];
+        const seen = new Set();
+        const current = new Map(); // unit -> entry started in this slot
+        for (let c = g.firstCol; c <= g.endCol; c++) {
+          const raw = row[c];
+          if (raw === '' || raw == null) continue;
+          const m = merges.get(r + ':' + c);
+          if (m && (m.s.c !== c || m.s.r !== r)) continue;
+          const a = c, bEnd = m ? Math.min(m.e.c, g.endCol) : c;
+          const info = m && m.e.r > r ? m.e.r + 1 : r + 1;
+          const infoRow = info < rows.length && !isTimeRow(info) ? rows[info] : [];
+          const covered = unitsIn(a, bEnd);
+          if (!covered.length) continue;
+          const lines = String(raw).split(/\n+/).map(clean).filter(Boolean);
+          const text = lines.join(' ');
+          const roomM = merges.get(info + ':' + a);
+          const roomEnd = roomM ? roomM.e.c : a;
+          let spanEnd = bEnd;
+          while (spanEnd < covered[covered.length - 1].c1 && !clean(row[spanEnd + 1]) && !merges.has(r + ':' + (spanEnd + 1)) ) spanEnd++;
+          if (spanEnd < covered[covered.length - 1].c1) {
+            // Nothing else in this unit's code row -> the teacher column at the unit's end is ours.
+            const rest = []; for (let x = spanEnd + 1; x <= covered[covered.length - 1].c1; x++) rest.push(x);
+            if (rest.every((x) => !clean(row[x]) && !(merges.get(r + ':' + x) && clean((rows[merges.get(r + ':' + x).s.r] || [])[merges.get(r + ':' + x).s.c])))) spanEnd = covered[covered.length - 1].c1;
+          }
+          const after = () => { for (let x = roomEnd + 1; x <= spanEnd; x++) { const v = clean(infoRow[x]); if (v) return v; } return ''; };
+          if (typeof raw === 'number') continue; // stray serial numbers / times
+          const tokens = (lines[0] || '').split('/').map((p) => p.trim()).filter(Boolean);
+          let code = tokens.map((p) => CODE_RE.exec(p) || PAREN_RE.exec(p)).find(Boolean);
+          let lineCode = null;
+          if (!code && (lineCode = LINE_RE.exec(lines[0] || ''))) code = [lineCode[0], lineCode[1], lineCode[2], ''];
+          const openFor = (u) => (open.get(u) || []).filter((e) => e.end === t);
+          const continuing = covered.filter((u) => openFor(u).length);
+
+          if (/^lab\b/i.test(text) || (!code && continuing.length)) {
+            // Continuation of a practical from the previous slot.
+            const fac = clean(infoRow[a]) || after();
+            for (const u of continuing.length ? continuing : covered) {
+              const list = openFor(u);
+              const e = list.find((x) => x._a <= bEnd && x._b >= a) || list[0];
+              if (!e || seen.has(e)) continue;
+              seen.add(e);
+              e.end = t + len;
+              if (fac && !e.faculty) e.faculty = fac;
+              if (!/^lab$/i.test(text) && !e.room) e.room = text;
+            }
+            continue;
+          }
+          if (!code) {
+            // A teacher's initials written beside the subject, or spilling into the next slot's row.
+            const cands = new Set();
+            for (const u of covered) {
+              const cur = current.get(u), prevE = last.get(u);
+              if (cur && !cur.faculty) cands.add(cur);
+              else if (prevE && prevE.end === t && !prevE.faculty) cands.add(prevE);
+            }
+            if (cands.size === 1 && /^[A-Z][A-Za-z0-9 .\/-]{0,24}$/.test(text)) {
+              [...cands][0].faculty = text;
+              continue;
+            }
+          }
+          if (!code && (/^[A-Z]{2,5}\d{3}[A-Z]?$/i.test(text) || /project|seminar|training|elective|library|mentor/i.test(text))) {
+            const e = {
+              year, category: covered[0].branch || '', groups: covered.map((u) => u.name), all: false,
+              day: b.day, start: t, end: t + len, label: '', subject: text, code: '',
+              type: /project/i.test(text) ? 'Project' : '', faculty: after(), room: clean(infoRow[a]), bm,
+            };
+            out.push(e);
+            for (const u of covered) { current.set(u, e); last.set(u, e); }
+            count++;
+            continue;
+          }
+          if (!code) { unknown++; if (root.TT_DEBUG) console.log("?", sheetName, r + 1, c, JSON.stringify(raw)); continue; }
+
+          const type = parseType(code[2]);
+          const subject = lineCode ? clean(lineCode[1]) : tokens.map((p) => { const x = CODE_RE.exec(p) || PAREN_RE.exec(p); return x ? (x[1] + (x[3] ? ' ' + x[3] : '')).trim() : p; }).join(' / ');
+          const room = clean(infoRow[a]) || lines.slice(1).join(' ');
+          const e = {
+            year, category: covered[0].branch || '',
+            groups: covered.map((u) => u.name), all: false,
+            day: b.day, start: t, end: t + len, label: '',
+            subject, code: '', type, faculty: after(), room,
+            bm,
+          };
+          out.push(e);
+          for (const u of covered) { current.set(u, e); last.set(u, e); }
+          count++;
+          if (type === 'Lab') {
+            e._a = a; e._b = bEnd;
+            for (const u of covered) (open.get(u) || open.set(u, []).get(u)).push(e);
+          }
+        }
+      });
+    }
+    return { units: units.length, entries: count, unknown, days: blocks.length };
+  }
+
   // ---------- main ----------
 
   function parseWorkbook(wb, XLSX) {
     const entries = [];
     const report = [];
+    const aliases = {};
 
     wb.SheetNames.forEach((name) => {
       const ws = wb.Sheets[name];
       if (!ws || !ws['!ref']) return;
+      const block = detectBlockGrid(XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: true }));
+      if (block) {
+        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: true });
+        const res = parseBlockGrid(raw, ws, block, name, entries, aliases);
+        if (res.entries) {
+          report.push({ sheet: name, layout: 'block', rows: res.entries, groupColumns: res.units, unknown: res.unknown });
+          return;
+        }
+      }
       const rows = sheetRows(XLSX, ws);
       const hdr = detectHeader(rows);
       if (!hdr) {
@@ -293,7 +556,7 @@
     });
 
     finalize(entries);
-    return { entries, report };
+    return { entries, report, aliases };
   }
 
   function parseList(rows, hr, map, sheetYear, out) {
@@ -398,7 +661,7 @@
     const shared = new Map();
     for (const e of entries) {
       e.groupKeys = e.groups.map(groupKey);
-      e.slotKey = [e.year, e.category.toLowerCase(), e.day, e.start, e.end, e.label.toLowerCase(),
+      e.slotKey = [e.year, e.day, e.start, e.end, e.label.toLowerCase(),
         norm(e.subject), norm(e.room)].join('|');
       if (!shared.has(e.slotKey)) shared.set(e.slotKey, { keys: new Map(), all: false });
       const s = shared.get(e.slotKey);
@@ -413,8 +676,12 @@
     const idx = {};
     for (const e of entries) {
       const y = (idx[e.year] = idx[e.year] || {});
-      const c = (y[e.category] = y[e.category] || new Map());
-      e.groups.forEach((g, i) => { if (!c.has(e.groupKeys[i])) c.set(e.groupKeys[i], g); });
+      e.groups.forEach((g, i) => {
+        const k = e.groupKeys[i];
+        const cat = e.bm ? e.bm.branch[k] || '' : e.category;
+        const c = (y[cat] = y[cat] || new Map());
+        if (!c.has(k)) c.set(k, g);
+      });
     }
     return idx;
   }
@@ -435,7 +702,7 @@
       const together = [];
       for (const [k, name] of e.shared.keys) if (k !== gKey) together.push(name);
       together.sort(naturalCompare);
-      mine.push({ ...e, together, togetherAll: e.shared.all });
+      mine.push({ ...e, together, togetherAll: e.shared.all, togetherParts: summarize(e, gKey) });
     }
     const byDay = new Map();
     for (const e of mine) {
@@ -461,6 +728,33 @@
       days.push({ day, name: DAYS[day], slots });
     }
     return days;
+  }
+
+  /**
+   * Short description of who shares a class, by batch where possible:
+   * ["all of 1A1", "1A2", "1A3"] instead of listing 24 groups.
+   */
+  function summarize(e, gKey) {
+    if (!e.bm) return null;
+    const byBatch = new Map();
+    const loose = [];
+    for (const [k, name] of e.shared.keys) {
+      const b = e.bm.of[k];
+      if (b) (byBatch.get(b) || byBatch.set(b, []).get(b)).push({ k, name }); else if (k !== gKey) loose.push(name);
+    }
+    const own = e.bm.of[gKey];
+    const parts = [];
+    let wholeOwn = false;
+    for (const [b, list] of [...byBatch].sort((x, y) => naturalCompare(x[0], y[0]))) {
+      const full = list.length === e.bm.size[b] && list.length > 1;
+      if (b === own) {
+        if (full) wholeOwn = true;
+        else parts.push(...list.filter((x) => x.k !== gKey).map((x) => x.name));
+      } else if (full) parts.push(b);
+      else parts.push(...list.map((x) => x.name));
+    }
+    parts.push(...loose);
+    return { wholeOwn: wholeOwn ? own : '', parts };
   }
 
   function naturalCompare(a, b) {
